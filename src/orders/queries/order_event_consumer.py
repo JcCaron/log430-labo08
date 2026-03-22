@@ -6,6 +6,7 @@ Auteurs : Gabriel C. Ullmann, Fabio Petrillo, 2025
 
 import json
 import threading
+import config
 from logger import Logger
 from typing import Optional
 from kafka import KafkaConsumer
@@ -28,10 +29,11 @@ class OrderEventConsumer(metaclass=Singleton):
         self.topic = topic
         self.group_id = group_id
         self.registry = registry
-        self.auto_offset_reset = 'latest'
+        self.auto_offset_reset = config.KAFKA_AUTO_OFFSET_RESET
         self.consumer: Optional[KafkaConsumer] = None
         self.running = False
         self.consumer_thread: Optional[threading.Thread] = None
+        self._subscription_ready = threading.Event()
     
     def start(self) -> None:
         """Start consuming messages from Kafka in a background thread so it does not prevent Flask from starting"""
@@ -42,24 +44,37 @@ class OrderEventConsumer(metaclass=Singleton):
         self.consumer_thread = threading.Thread(target=self._consume_messages)
         self.consumer_thread.daemon = True 
         self.consumer_thread.start()
+        # Avoid losing the first event with auto_offset_reset=latest: wait until the
+        # consumer has joined the group and fixed its partition offsets.
+        if not self._subscription_ready.wait(timeout=30):
+            logger.error(
+                "Le consommateur Kafka ne s'est pas abonné au topic dans les 30s."
+            )
     
     def _consume_messages(self) -> None:
         """Continuously consume messages from Kafka"""
         logger.debug(f"Démarrer un consommateur pour le topic : {self.topic}")
         
-        self.consumer = KafkaConsumer(
-            self.topic,
-            bootstrap_servers=self.bootstrap_servers,
-            group_id=self.group_id,
-            auto_offset_reset=self.auto_offset_reset,
-            value_deserializer=lambda m: json.loads(m.decode('utf-8')),
-            enable_auto_commit=True,
-            session_timeout_ms=30000,
-            heartbeat_interval_ms=10000,
-            max_poll_interval_ms=300000,
-            max_poll_records=10
-        )
-        
+        try:
+            self.consumer = KafkaConsumer(
+                self.topic,
+                bootstrap_servers=self.bootstrap_servers,
+                group_id=self.group_id,
+                auto_offset_reset=self.auto_offset_reset,
+                value_deserializer=lambda m: json.loads(m.decode('utf-8')),
+                enable_auto_commit=True,
+                session_timeout_ms=30000,
+                heartbeat_interval_ms=10000,
+                max_poll_interval_ms=300000,
+                max_poll_records=10
+            )
+            self.consumer.poll(timeout_ms=3000)
+        except Exception as e:
+            logger.error(f"Erreur création consommateur Kafka : {e}", exc_info=True)
+            raise
+        finally:
+            self._subscription_ready.set()
+
         try:
             while self.running:
                 messages = self.consumer.poll(timeout_ms=1000)

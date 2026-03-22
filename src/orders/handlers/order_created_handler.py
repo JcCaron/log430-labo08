@@ -8,7 +8,7 @@ import config
 from db import get_sqlalchemy_session
 from event_management.base_handler import EventHandler
 from orders.commands.order_event_producer import OrderEventProducer
-from stocks.commands.write_stock import check_out_items_from_stock
+from stocks.commands.write_stock import check_out_items_from_stock, update_stock_redis
 
 
 class OrderCreatedHandler(EventHandler):
@@ -24,10 +24,23 @@ class OrderCreatedHandler(EventHandler):
     
     def handle(self, event_data: Dict[str, Any]) -> None:
         """Execute every time the event is published"""
-        # TODO: Remplacez TOUTES les lignes de cette méthode par les lignes de la méthode _handle_implemented. Il suffit de copier-coller.
-        event_data['event'] = "StockDecreased"
-        self.logger.debug(f"payment_link={event_data['payment_link']}")
-        OrderEventProducer().get_instance().send(config.KAFKA_TOPIC, value=event_data)
+        order_event_producer = OrderEventProducer()
+        session = get_sqlalchemy_session()
+        try:
+            # La création de la comande a réussi, alors déclenchez la mise à jour du stock.
+            check_out_items_from_stock(session, event_data['order_items'])
+            session.commit()
+            update_stock_redis(event_data["order_items"], "-")
+            # Si la mise à jour du stock a réussi, déclenchez StockDecreased.
+            event_data['event'] = "StockDecreased"
+        except Exception as e:
+            session.rollback()
+            # Si la mise à jour du stock a échoué, déclenchez StockDecreaseFailed.
+            event_data['event'] = "StockDecreaseFailed"
+            event_data['error'] = str(e)
+        finally:
+            session.close()
+            order_event_producer.get_instance().send(config.KAFKA_TOPIC, value=event_data)
 
     def _handle_implemented(self, event_data: Dict[str, Any]) -> None:
         """

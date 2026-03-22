@@ -16,6 +16,7 @@ from stocks.handlers.stock_decrease_failed_handler import StockDecreaseFailedHan
 from stocks.handlers.stock_increased_handler import StockIncreasedHandler
 from payments.handlers.payment_created_handler import PaymentCreatedHandler
 from payments.handlers.payment_creation_failed_handler import PaymentCreationFailedHandler
+from payments.outbox_processor import OutboxProcessor
 from orders.queries.order_event_consumer import OrderEventConsumer
 from stocks.schemas.query import Query
 from flask import Flask, request, jsonify
@@ -50,6 +51,12 @@ consumer_service = OrderEventConsumer(
     registry=registry
 )
 consumer_service.start()
+
+# Traiter les entrées Outbox en attente une fois au démarrage (reprise après panne)
+is_outbox_processor_running = False
+if not is_outbox_processor_running:
+    OutboxProcessor().run()
+    is_outbox_processor_running = True
 
 @app.get('/health-check')
 def health():
